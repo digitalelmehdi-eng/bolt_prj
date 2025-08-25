@@ -1,0 +1,39 @@
+# Enable URL rewriting
+RewriteEngine On
+
+# Redirect to login if not authenticated (except for public files)
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_URI} !^/(login|install|api|css|js|images)
+RewriteRule ^(.*)$ login.php [L,R=302]
+
+# API routes
+RewriteRule ^api/generate-ticket$ api/generate_ticket.php [L]
+RewriteRule ^api/call-next$ api/call_next_ticket.php [L]
+RewriteRule ^api/queue-status$ api/get_queue_status.php [L]
+
+# Security headers
+Header always set X-Content-Type-Options nosniff
+Header always set X-Frame-Options DENY
+Header always set X-XSS-Protection "1; mode=block"
+
+# Prevent access to sensitive files
+<Files "*.php">
+    Order allow,deny
+    Allow from all
+</Files>
+
+<Files "config/*">
+    Order deny,allow
+    Deny from all
+</Files>
+
+<Files "includes/*">
+    Order deny,allow
+    Deny from all
+</Files>
+
+<Files "models/*">
+    Order deny,allow
+    Deny from all
+</Files>
