@@ -1,3 +1,52 @@
+<?php
+require_once '../config/config.php';
+require_once '../config/database.php';
+require_once '../models/Service.php';
+require_once '../models/Ticket.php';
+
+$database = new Database();
+$db = $database->getConnection();
+
+// Get currently serving tickets
+$serving_query = "SELECT t.ticket_number, s.display_name as service_name, s.prefix, d.desk_name, d.desk_number, t.called_at, t.status
+                  FROM tickets t
+                  JOIN services s ON t.service_id = s.id
+                  LEFT JOIN desks d ON t.assigned_desk_id = d.id
+                  WHERE t.status IN ('called', 'in_progress')
+                  ORDER BY t.called_at DESC";
+$serving_stmt = $db->prepare($serving_query);
+$serving_stmt->execute();
+$serving_tickets = $serving_stmt->fetchAll();
+
+// Get queue overview
+$service = new Service($db);
+$services_result = $service->get_queue_status();
+$services_data = [];
+while ($row = $services_result->fetch()) {
+    $services_data[] = $row;
+}
+
+// Get recent completed tickets
+$recent_completed_query = "SELECT t.ticket_number, s.display_name as service_name, s.prefix, d.desk_name, t.completed_at
+                          FROM tickets t
+                          JOIN services s ON t.service_id = s.id
+                          LEFT JOIN desks d ON t.assigned_desk_id = d.id
+                          WHERE t.status = 'completed' AND DATE(t.completed_at) = CURDATE()
+                          ORDER BY t.completed_at DESC LIMIT 5";
+$recent_completed_stmt = $db->prepare($recent_completed_query);
+$recent_completed_stmt->execute();
+$recent_completed = $recent_completed_stmt->fetchAll();
+
+// Get next to be called
+$next_tickets_query = "SELECT t.ticket_number, s.display_name as service_name, s.prefix, t.generated_at
+                      FROM tickets t
+                      JOIN services s ON t.service_id = s.id
+                      WHERE t.status = 'waiting'
+                      ORDER BY t.priority_level DESC, t.queue_position ASC LIMIT 5";
+$next_tickets_stmt = $db->prepare($next_tickets_query);
+$next_tickets_stmt->execute();
+$next_tickets = $next_tickets_stmt->fetchAll();
+?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -137,97 +186,58 @@
             </div>
 
             <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-8">
-                <!-- Desktop 1 - Active -->
-                <div class="serving-card active rounded-2xl p-8 text-center">
-                    <div class="mb-6">
-                        <div class="w-16 h-16 bg-success rounded-full flex items-center justify-center mx-auto mb-4">
-                            <i class="fas fa-desktop text-white text-2xl"></i>
+                <?php if (count($serving_tickets) > 0): ?>
+                    <?php foreach ($serving_tickets as $ticket): ?>
+                        <div class="serving-card active rounded-2xl p-8 text-center">
+                            <div class="mb-6">
+                                <div class="w-16 h-16 bg-success rounded-full flex items-center justify-center mx-auto mb-4">
+                                    <i class="fas fa-desktop text-white text-2xl"></i>
+                                </div>
+                                <h3 class="text-2xl font-bold text-text-primary mb-2"><?php echo htmlspecialchars($ticket['desk_name'] ?? 'Desktop ' . $ticket['desk_number']); ?></h3>
+                                <p class="text-lg text-secondary-600"><?php echo htmlspecialchars($ticket['service_name']); ?></p>
+                            </div>
+                            
+                            <div class="ticket-number text-success mb-4"><?php echo htmlspecialchars($ticket['ticket_number']); ?></div>
+                            
+                            <div class="status-indicator status-success text-lg mb-4">
+                                <i class="fas fa-circle text-sm mr-2"></i>
+                                Now Serving
+                            </div>
+                            
+                            <div class="text-secondary-600">
+                                <p class="text-lg">Started: <?php echo date('g:i A', strtotime($ticket['called_at'])); ?></p>
+                                <p class="text-base mt-2">Service in progress</p>
+                            </div>
                         </div>
-                        <h3 class="text-2xl font-bold text-text-primary mb-2">Desktop 1</h3>
-                        <p class="text-lg text-secondary-600">General Service</p>
-                    </div>
-                    
-                    <div class="ticket-number text-success mb-4">A045</div>
-                    
-                    <div class="status-indicator status-success text-lg mb-4">
-                        <i class="fas fa-circle text-sm mr-2"></i>
-                        Now Serving
-                    </div>
-                    
-                    <div class="text-secondary-600">
-                        <p class="text-lg">Started: 2:15 PM</p>
-                        <p class="text-base mt-2">Estimated completion: 2:50 PM</p>
-                    </div>
-                </div>
-
-                <!-- Desktop 2 - Active -->
-                <div class="serving-card active rounded-2xl p-8 text-center">
-                    <div class="mb-6">
-                        <div class="w-16 h-16 bg-primary rounded-full flex items-center justify-center mx-auto mb-4">
-                            <i class="fas fa-desktop text-white text-2xl"></i>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+                
+                <!-- Fill remaining slots with available desks -->
+                <?php 
+                $remaining_slots = 4 - count($serving_tickets);
+                for ($i = 0; $i < $remaining_slots; $i++): 
+                ?>
+                    <div class="serving-card rounded-2xl p-8 text-center">
+                        <div class="mb-6">
+                            <div class="w-16 h-16 bg-secondary-300 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <i class="fas fa-desktop text-secondary-600 text-2xl"></i>
+                            </div>
+                            <h3 class="text-2xl font-bold text-text-primary mb-2">Desktop <?php echo count($serving_tickets) + $i + 1; ?></h3>
+                            <p class="text-lg text-secondary-600">Available</p>
                         </div>
-                        <h3 class="text-2xl font-bold text-text-primary mb-2">Desktop 2</h3>
-                        <p class="text-lg text-secondary-600">Account Opening</p>
-                    </div>
-                    
-                    <div class="ticket-number text-primary mb-4">B023</div>
-                    
-                    <div class="status-indicator status-success text-lg mb-4">
-                        <i class="fas fa-circle text-sm mr-2"></i>
-                        Now Serving
-                    </div>
-                    
-                    <div class="text-secondary-600">
-                        <p class="text-lg">Started: 2:18 PM</p>
-                        <p class="text-base mt-2">Estimated completion: 3:05 PM</p>
-                    </div>
-                </div>
-
-                <!-- Desktop 3 - Available -->
-                <div class="serving-card rounded-2xl p-8 text-center">
-                    <div class="mb-6">
-                        <div class="w-16 h-16 bg-secondary-300 rounded-full flex items-center justify-center mx-auto mb-4">
-                            <i class="fas fa-desktop text-secondary-600 text-2xl"></i>
+                        
+                        <div class="ticket-number text-secondary-400 mb-4">---</div>
+                        
+                        <div class="status-indicator bg-secondary-200 text-secondary-600 text-lg mb-4">
+                            <i class="fas fa-circle text-sm mr-2"></i>
+                            Available
                         </div>
-                        <h3 class="text-2xl font-bold text-text-primary mb-2">Desktop 3</h3>
-                        <p class="text-lg text-secondary-600">Loan Services</p>
-                    </div>
-                    
-                    <div class="ticket-number text-secondary-400 mb-4">---</div>
-                    
-                    <div class="status-indicator bg-secondary-200 text-secondary-600 text-lg mb-4">
-                        <i class="fas fa-circle text-sm mr-2"></i>
-                        Available
-                    </div>
-                    
-                    <div class="text-secondary-600">
-                        <p class="text-lg">Ready for next customer</p>
-                        <p class="text-base mt-2">Next in queue: C013</p>
-                    </div>
-                </div>
-
-                <!-- Desktop 4 - On Break -->
-                <div class="serving-card rounded-2xl p-8 text-center">
-                    <div class="mb-6">
-                        <div class="w-16 h-16 bg-warning-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                            <i class="fas fa-desktop text-warning text-2xl"></i>
+                        
+                        <div class="text-secondary-600">
+                            <p class="text-lg">Ready for next customer</p>
                         </div>
-                        <h3 class="text-2xl font-bold text-text-primary mb-2">Desktop 4</h3>
-                        <p class="text-lg text-secondary-600">Customer Support</p>
                     </div>
-                    
-                    <div class="ticket-number text-warning mb-4">---</div>
-                    
-                    <div class="status-indicator status-warning text-lg mb-4">
-                        <i class="fas fa-circle text-sm mr-2"></i>
-                        On Break
-                    </div>
-                    
-                    <div class="text-secondary-600">
-                        <p class="text-lg">Back at: 2:45 PM</p>
-                        <p class="text-base mt-2">Next in queue: D008</p>
-                    </div>
-                </div>
+                <?php endfor; ?>
             </div>
         </section>
 
@@ -237,49 +247,17 @@
                 <h3 class="text-3xl font-bold text-text-primary mb-8 text-center">Queue Overview</h3>
                 
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    <!-- General Service Queue -->
-                    <div class="text-center p-6 bg-primary-50 rounded-xl">
-                        <div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mx-auto mb-4">
-                            <i class="fas fa-users text-white"></i>
+                    <?php foreach ($services_data as $service): ?>
+                        <div class="text-center p-6 bg-primary-50 rounded-xl">
+                            <div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mx-auto mb-4">
+                                <i class="<?php echo $service['icon_class'] ?? 'fas fa-cog'; ?> text-white"></i>
+                            </div>
+                            <h4 class="text-xl font-semibold text-text-primary mb-2"><?php echo htmlspecialchars($service['display_name']); ?></h4>
+                            <div class="text-3xl font-bold text-primary mb-2"><?php echo $service['current_queue_count'] ?? 0; ?></div>
+                            <p class="text-secondary-600">customers waiting</p>
+                            <p class="text-sm text-secondary-500 mt-2">Est. wait: <?php echo $service['average_wait_time'] ?? $service['estimated_duration']; ?> min</p>
                         </div>
-                        <h4 class="text-xl font-semibold text-text-primary mb-2">General Service</h4>
-                        <div class="text-3xl font-bold text-primary mb-2">12</div>
-                        <p class="text-secondary-600">customers waiting</p>
-                        <p class="text-sm text-secondary-500 mt-2">Est. wait: 15-20 min</p>
-                    </div>
-
-                    <!-- Account Opening Queue -->
-                    <div class="text-center p-6 bg-accent-100 rounded-xl">
-                        <div class="w-12 h-12 bg-accent rounded-lg flex items-center justify-center mx-auto mb-4">
-                            <i class="fas fa-user-plus text-white"></i>
-                        </div>
-                        <h4 class="text-xl font-semibold text-text-primary mb-2">Account Opening</h4>
-                        <div class="text-3xl font-bold text-accent mb-2">8</div>
-                        <p class="text-secondary-600">customers waiting</p>
-                        <p class="text-sm text-secondary-500 mt-2">Est. wait: 25-30 min</p>
-                    </div>
-
-                    <!-- Loan Services Queue -->
-                    <div class="text-center p-6 bg-success-100 rounded-xl">
-                        <div class="w-12 h-12 bg-success rounded-lg flex items-center justify-center mx-auto mb-4">
-                            <i class="fas fa-hand-holding-usd text-white"></i>
-                        </div>
-                        <h4 class="text-xl font-semibold text-text-primary mb-2">Loan Services</h4>
-                        <div class="text-3xl font-bold text-success mb-2">5</div>
-                        <p class="text-secondary-600">customers waiting</p>
-                        <p class="text-sm text-secondary-500 mt-2">Est. wait: 10-15 min</p>
-                    </div>
-
-                    <!-- Customer Support Queue -->
-                    <div class="text-center p-6 bg-error-100 rounded-xl">
-                        <div class="w-12 h-12 bg-error rounded-lg flex items-center justify-center mx-auto mb-4">
-                            <i class="fas fa-headset text-white"></i>
-                        </div>
-                        <h4 class="text-xl font-semibold text-text-primary mb-2">Customer Support</h4>
-                        <div class="text-3xl font-bold text-error mb-2">3</div>
-                        <p class="text-secondary-600">customers waiting</p>
-                        <p class="text-sm text-secondary-500 mt-2">Est. wait: 5-10 min</p>
-                    </div>
+                    <?php endforeach; ?>
                 </div>
             </div>
         </section>
@@ -297,44 +275,27 @@
                             Recently Completed
                         </h4>
                         <div class="space-y-3">
-                            <div class="flex items-center justify-between p-4 bg-success-50 rounded-lg">
-                                <div class="flex items-center space-x-4">
-                                    <div class="text-2xl font-bold text-success">A044</div>
-                                    <div>
-                                        <p class="font-medium text-text-primary">General Service</p>
-                                        <p class="text-sm text-secondary-500">Desktop 1 • Completed at 2:12 PM</p>
+                            <?php if (count($recent_completed) > 0): ?>
+                                <?php foreach ($recent_completed as $ticket): ?>
+                                    <div class="flex items-center justify-between p-4 bg-success-50 rounded-lg">
+                                        <div class="flex items-center space-x-4">
+                                            <div class="text-2xl font-bold text-success"><?php echo htmlspecialchars($ticket['ticket_number']); ?></div>
+                                            <div>
+                                                <p class="font-medium text-text-primary"><?php echo htmlspecialchars($ticket['service_name']); ?></p>
+                                                <p class="text-sm text-secondary-500"><?php echo htmlspecialchars($ticket['desk_name'] ?? 'Desktop'); ?> • Completed at <?php echo date('g:i A', strtotime($ticket['completed_at'])); ?></p>
+                                            </div>
+                                        </div>
+                                        <div class="text-success">
+                                            <i class="fas fa-check-circle text-xl"></i>
+                                        </div>
                                     </div>
+                                <?php endforeach; ?>
+                            <?php else: ?>
+                                <div class="text-center py-8 text-secondary-500">
+                                    <i class="fas fa-clock text-4xl mb-4"></i>
+                                    <p>No completed tickets today</p>
                                 </div>
-                                <div class="text-success">
-                                    <i class="fas fa-check-circle text-xl"></i>
-                                </div>
-                            </div>
-                            
-                            <div class="flex items-center justify-between p-4 bg-success-50 rounded-lg">
-                                <div class="flex items-center space-x-4">
-                                    <div class="text-2xl font-bold text-success">B022</div>
-                                    <div>
-                                        <p class="font-medium text-text-primary">Account Opening</p>
-                                        <p class="text-sm text-secondary-500">Desktop 2 • Completed at 2:08 PM</p>
-                                    </div>
-                                </div>
-                                <div class="text-success">
-                                    <i class="fas fa-check-circle text-xl"></i>
-                                </div>
-                            </div>
-                            
-                            <div class="flex items-center justify-between p-4 bg-success-50 rounded-lg">
-                                <div class="flex items-center space-x-4">
-                                    <div class="text-2xl font-bold text-success">C011</div>
-                                    <div>
-                                        <p class="font-medium text-text-primary">Loan Services</p>
-                                        <p class="text-sm text-secondary-500">Desktop 3 • Completed at 2:05 PM</p>
-                                    </div>
-                                </div>
-                                <div class="text-success">
-                                    <i class="fas fa-check-circle text-xl"></i>
-                                </div>
-                            </div>
+                            <?php endif; ?>
                         </div>
                     </div>
 
@@ -345,44 +306,27 @@
                             Next to be Called
                         </h4>
                         <div class="space-y-3">
-                            <div class="flex items-center justify-between p-4 bg-primary-50 rounded-lg">
-                                <div class="flex items-center space-x-4">
-                                    <div class="text-2xl font-bold text-primary">A046</div>
-                                    <div>
-                                        <p class="font-medium text-text-primary">General Service</p>
-                                        <p class="text-sm text-secondary-500">Waiting since 2:20 PM</p>
+                            <?php if (count($next_tickets) > 0): ?>
+                                <?php foreach ($next_tickets as $ticket): ?>
+                                    <div class="flex items-center justify-between p-4 bg-primary-50 rounded-lg">
+                                        <div class="flex items-center space-x-4">
+                                            <div class="text-2xl font-bold text-primary"><?php echo htmlspecialchars($ticket['ticket_number']); ?></div>
+                                            <div>
+                                                <p class="font-medium text-text-primary"><?php echo htmlspecialchars($ticket['service_name']); ?></p>
+                                                <p class="text-sm text-secondary-500">Waiting since <?php echo date('g:i A', strtotime($ticket['generated_at'])); ?></p>
+                                            </div>
+                                        </div>
+                                        <div class="text-primary">
+                                            <i class="fas fa-hourglass-half text-xl"></i>
+                                        </div>
                                     </div>
+                                <?php endforeach; ?>
+                            <?php else: ?>
+                                <div class="text-center py-8 text-secondary-500">
+                                    <i class="fas fa-inbox text-4xl mb-4"></i>
+                                    <p>No tickets waiting</p>
                                 </div>
-                                <div class="text-primary">
-                                    <i class="fas fa-hourglass-half text-xl"></i>
-                                </div>
-                            </div>
-                            
-                            <div class="flex items-center justify-between p-4 bg-accent-50 rounded-lg">
-                                <div class="flex items-center space-x-4">
-                                    <div class="text-2xl font-bold text-accent">B024</div>
-                                    <div>
-                                        <p class="font-medium text-text-primary">Account Opening</p>
-                                        <p class="text-sm text-secondary-500">Waiting since 2:25 PM</p>
-                                    </div>
-                                </div>
-                                <div class="text-accent">
-                                    <i class="fas fa-hourglass-half text-xl"></i>
-                                </div>
-                            </div>
-                            
-                            <div class="flex items-center justify-between p-4 bg-success-50 rounded-lg">
-                                <div class="flex items-center space-x-4">
-                                    <div class="text-2xl font-bold text-success">C013</div>
-                                    <div>
-                                        <p class="font-medium text-text-primary">Loan Services</p>
-                                        <p class="text-sm text-secondary-500">Waiting since 2:30 PM</p>
-                                    </div>
-                                </div>
-                                <div class="text-success">
-                                    <i class="fas fa-hourglass-half text-xl"></i>
-                                </div>
-                            </div>
+                            <?php endif; ?>
                         </div>
                     </div>
                 </div>
@@ -431,19 +375,17 @@
 
         // Simulate real-time queue updates
         function simulateQueueUpdates() {
-            // This would typically connect to WebSocket or Server-Sent Events
-            console.log('Queue status updated at:', new Date().toLocaleTimeString());
-            
-            // Simulate random queue changes
-            const queueCounts = document.querySelectorAll('.text-3xl.font-bold');
-            queueCounts.forEach((element, index) => {
-                if (index > 0 && index < 5) { // Skip the time display
-                    const currentCount = parseInt(element.textContent);
-                    const change = Math.floor(Math.random() * 3) - 1; // -1, 0, or 1
-                    const newCount = Math.max(0, currentCount + change);
-                    element.textContent = newCount;
-                }
-            });
+            // Fetch real-time queue status
+            fetch('../api/get_queue_status.php')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        console.log('Queue status updated at:', new Date().toLocaleTimeString());
+                        // Refresh page to show updated data
+                        location.reload();
+                    }
+                })
+                .catch(error => console.error('Error fetching queue status:', error));
         }
 
         // Simulate updates every 30 seconds
