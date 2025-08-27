@@ -1,3 +1,76 @@
+<?php
+require_once '../config/config.php';
+require_once '../config/database.php';
+require_once '../models/Ticket.php';
+require_once '../models/Service.php';
+require_once '../includes/functions.php';
+
+// Check authentication
+check_authentication();
+
+// Check operator permissions
+if (!has_permission('operator')) {
+    header('Location: ../login.php');
+    exit();
+}
+
+$database = new Database();
+$db = $database->getConnection();
+
+// Get operator's current serving ticket
+$current_ticket_query = "SELECT t.*, s.display_name as service_name, s.prefix 
+                        FROM tickets t 
+                        JOIN services s ON t.service_id = s.id 
+                        WHERE t.status IN ('called', 'in_progress') 
+                        AND t.assigned_desk_id = (
+                            SELECT id FROM desks WHERE current_operator_id = ? LIMIT 1
+                        )
+                        ORDER BY t.called_at DESC LIMIT 1";
+$current_ticket_stmt = $db->prepare($current_ticket_query);
+$current_ticket_stmt->execute([$_SESSION['user_id']]);
+$current_ticket = $current_ticket_stmt->fetch();
+
+// Get operator's queue (next tickets to serve)
+$queue_query = "SELECT t.*, s.display_name as service_name, s.prefix 
+               FROM tickets t 
+               JOIN services s ON t.service_id = s.id 
+               WHERE t.status = 'waiting' 
+               AND s.id IN (
+                   SELECT JSON_UNQUOTE(JSON_EXTRACT(services, CONCAT('$[', idx.idx, ']'))) as service_id
+                   FROM desks d
+                   JOIN (SELECT 0 as idx UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4) idx 
+                   ON JSON_UNQUOTE(JSON_EXTRACT(d.services, CONCAT('$[', idx.idx, ']'))) IS NOT NULL
+                   WHERE d.current_operator_id = ?
+               )
+               ORDER BY t.priority_level DESC, t.queue_position ASC 
+               LIMIT 5";
+$queue_stmt = $db->prepare($queue_query);
+$queue_stmt->execute([$_SESSION['user_id']]);
+$queue_tickets = $queue_stmt->fetchAll();
+
+// Get today's performance stats
+$today_served_query = "SELECT COUNT(*) as count FROM tickets 
+                      WHERE status = 'completed' 
+                      AND DATE(completed_at) = CURDATE()
+                      AND assigned_desk_id = (
+                          SELECT id FROM desks WHERE current_operator_id = ? LIMIT 1
+                      )";
+$today_served_stmt = $db->prepare($today_served_query);
+$today_served_stmt->execute([$_SESSION['user_id']]);
+$today_served = $today_served_stmt->fetch()['count'];
+
+// Get average service time
+$avg_service_query = "SELECT AVG(TIMESTAMPDIFF(MINUTE, called_at, completed_at)) as avg_time 
+                     FROM tickets 
+                     WHERE completed_at IS NOT NULL 
+                     AND DATE(completed_at) = CURDATE()
+                     AND assigned_desk_id = (
+                         SELECT id FROM desks WHERE current_operator_id = ? LIMIT 1
+                     )";
+$avg_service_stmt = $db->prepare($avg_service_query);
+$avg_service_stmt->execute([$_SESSION['user_id']]);
+$avg_service_time = round($avg_service_stmt->fetch()['avg_time'] ?? 0, 1);
+?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -24,7 +97,7 @@
                         </div>
                         <div>
                             <h1 class="text-xl font-semibold text-text-primary">Operator Dashboard</h1>
-                            <p class="text-sm text-secondary-500">Desktop 2 - Michael Chen</p>
+                            <p class="text-sm text-secondary-500">Desktop - <?php echo htmlspecialchars($_SESSION['full_name']); ?></p>
                         </div>
                     </div>
                 </div>
@@ -49,15 +122,15 @@
                     <!-- User Profile -->
                     <div class="flex items-center space-x-3">
                         <div class="text-right hidden sm:block">
-                            <p class="text-sm font-medium text-text-primary">Michael Chen</p>
+                            <p class="text-sm font-medium text-text-primary"><?php echo htmlspecialchars($_SESSION['full_name']); ?></p>
                             <p class="text-xs text-secondary-500">Service Operator</p>
                         </div>
                         <div class="w-10 h-10 bg-primary-100 rounded-full flex items-center justify-center">
                             <i class="fas fa-user text-primary"></i>
                         </div>
-                        <button class="p-2 rounded-lg hover:bg-secondary-100 transition-smooth">
+                        <a href="../logout.php" class="p-2 rounded-lg hover:bg-secondary-100 transition-smooth">
                             <i class="fas fa-sign-out-alt text-secondary-600"></i>
-                        </button>
+                        </a>
                     </div>
                 </div>
             </div>
@@ -148,53 +221,72 @@
                                 </div>
                             </div>
 
-                            <div id="currentTicket" class="bg-primary-50 rounded-lg p-6 mb-6">
-                                <div class="flex items-center justify-between mb-4">
-                                    <div class="flex items-center space-x-4">
-                                        <div class="w-16 h-16 bg-primary rounded-lg flex items-center justify-center">
-                                            <span class="text-2xl font-bold text-white">B</span>
+                            <?php if ($current_ticket): ?>
+                                <div id="currentTicket" class="bg-primary-50 rounded-lg p-6 mb-6">
+                                    <div class="flex items-center justify-between mb-4">
+                                        <div class="flex items-center space-x-4">
+                                            <div class="w-16 h-16 bg-primary rounded-lg flex items-center justify-center">
+                                                <span class="text-2xl font-bold text-white"><?php echo $current_ticket['prefix']; ?></span>
+                                            </div>
+                                            <div>
+                                                <h4 class="text-3xl font-bold text-text-primary"><?php echo htmlspecialchars($current_ticket['ticket_number']); ?></h4>
+                                                <p class="text-secondary-600"><?php echo htmlspecialchars($current_ticket['service_name']); ?></p>
+                                            </div>
                                         </div>
-                                        <div>
-                                            <h4 class="text-3xl font-bold text-text-primary">B023</h4>
-                                            <p class="text-secondary-600">Account Opening</p>
+                                        <div class="text-right">
+                                            <p class="text-sm text-secondary-500">Serving Time</p>
+                                            <p class="text-2xl font-semibold text-text-primary" id="servingTime">00:00</p>
                                         </div>
                                     </div>
-                                    <div class="text-right">
-                                        <p class="text-sm text-secondary-500">Serving Time</p>
-                                        <p class="text-2xl font-semibold text-text-primary" id="servingTime">03:42</p>
-                                    </div>
-                                </div>
 
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                                    <div class="bg-surface rounded-lg p-4">
-                                        <p class="text-sm text-secondary-500 mb-1">Customer Priority</p>
-                                        <div class="flex items-center space-x-2">
-                                            <div class="w-3 h-3 bg-warning rounded-full"></div>
-                                            <span class="font-medium text-warning">Standard</span>
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                                        <div class="bg-surface rounded-lg p-4">
+                                            <p class="text-sm text-secondary-500 mb-1">Customer Priority</p>
+                                            <div class="flex items-center space-x-2">
+                                                <div class="w-3 h-3 bg-<?php echo $current_ticket['priority_level'] == 'priority' ? 'accent' : 'warning'; ?> rounded-full"></div>
+                                                <span class="font-medium text-<?php echo $current_ticket['priority_level'] == 'priority' ? 'accent' : 'warning'; ?>"><?php echo ucfirst($current_ticket['priority_level']); ?></span>
+                                            </div>
+                                        </div>
+                                        <div class="bg-surface rounded-lg p-4">
+                                            <p class="text-sm text-secondary-500 mb-1">Wait Time</p>
+                                            <p class="font-semibold text-text-primary">
+                                                <?php 
+                                                if ($current_ticket['called_at']) {
+                                                    $wait_minutes = floor((strtotime($current_ticket['called_at']) - strtotime($current_ticket['generated_at'])) / 60);
+                                                    echo $wait_minutes . ' min';
+                                                } else {
+                                                    echo '--';
+                                                }
+                                                ?>
+                                            </p>
                                         </div>
                                     </div>
-                                    <div class="bg-surface rounded-lg p-4">
-                                        <p class="text-sm text-secondary-500 mb-1">Wait Time</p>
-                                        <p class="font-semibold text-text-primary">12:35</p>
+
+                                    <!-- Action Buttons -->
+                                    <div class="flex flex-wrap gap-3">
+                                        <button class="btn btn-primary flex-1 min-w-0" onclick="completeTicket(<?php echo $current_ticket['id']; ?>)">
+                                            <i class="fas fa-check mr-2"></i>
+                                            Complete Service
+                                        </button>
+                                        <button class="btn btn-secondary" onclick="reassignTicket(<?php echo $current_ticket['id']; ?>)">
+                                            <i class="fas fa-exchange-alt mr-2"></i>
+                                            Reassign
+                                        </button>
+                                        <button class="btn btn-secondary" onclick="recallTicket(<?php echo $current_ticket['id']; ?>)">
+                                            <i class="fas fa-undo mr-2"></i>
+                                            Recall
+                                        </button>
                                     </div>
                                 </div>
-
-                                <!-- Action Buttons -->
-                                <div class="flex flex-wrap gap-3">
-                                    <button class="btn btn-primary flex-1 min-w-0" onclick="completeTicket()">
-                                        <i class="fas fa-check mr-2"></i>
-                                        Complete Service
-                                    </button>
-                                    <button class="btn btn-secondary" onclick="reassignTicket()">
-                                        <i class="fas fa-exchange-alt mr-2"></i>
-                                        Reassign
-                                    </button>
-                                    <button class="btn btn-secondary" onclick="recallTicket()">
-                                        <i class="fas fa-undo mr-2"></i>
-                                        Recall
-                                    </button>
+                            <?php else: ?>
+                                <div class="bg-secondary-50 rounded-lg p-6 mb-6 text-center">
+                                    <div class="w-16 h-16 bg-secondary-200 rounded-lg flex items-center justify-center mx-auto mb-4">
+                                        <i class="fas fa-clock text-secondary-500 text-2xl"></i>
+                                    </div>
+                                    <h4 class="text-xl font-semibold text-text-primary mb-2">No Current Ticket</h4>
+                                    <p class="text-secondary-600">Ready to serve the next customer</p>
                                 </div>
-                            </div>
+                            <?php endif; ?>
 
                             <!-- Call Next Ticket Button -->
                             <button id="callNextBtn" class="w-full btn btn-primary text-xl py-6 floating-action" onclick="callNextTicket()">
@@ -214,69 +306,50 @@
                             </div>
 
                             <div class="space-y-3">
-                                <!-- Queue Item 1 -->
-                                <div class="flex items-center justify-between p-4 bg-secondary-50 rounded-lg">
-                                    <div class="flex items-center space-x-4">
-                                        <div class="w-12 h-12 bg-primary-100 rounded-lg flex items-center justify-center">
-                                            <span class="font-bold text-primary">B024</span>
+                                <?php if (count($queue_tickets) > 0): ?>
+                                    <?php foreach ($queue_tickets as $index => $ticket): ?>
+                                        <div class="flex items-center justify-between p-4 bg-secondary-50 rounded-lg">
+                                            <div class="flex items-center space-x-4">
+                                                <div class="w-12 h-12 bg-primary-100 rounded-lg flex items-center justify-center">
+                                                    <span class="font-bold text-primary"><?php echo htmlspecialchars($ticket['ticket_number']); ?></span>
+                                                </div>
+                                                <div>
+                                                    <p class="font-medium text-text-primary"><?php echo htmlspecialchars($ticket['service_name']); ?></p>
+                                                    <p class="text-sm text-secondary-500">
+                                                        Waiting: <?php echo floor((time() - strtotime($ticket['generated_at'])) / 60); ?> min
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <div class="flex items-center space-x-3">
+                                                <?php if ($index === 0): ?>
+                                                    <div class="status-indicator bg-warning-100 text-warning-500">
+                                                        <i class="fas fa-circle text-xs mr-1"></i>
+                                                        Next
+                                                    </div>
+                                                    <div class="w-3 h-3 bg-warning rounded-full"></div>
+                                                <?php else: ?>
+                                                    <span class="text-sm text-secondary-500">#<?php echo $index + 1; ?></span>
+                                                    <div class="w-3 h-3 bg-secondary-300 rounded-full"></div>
+                                                <?php endif; ?>
+                                            </div>
                                         </div>
-                                        <div>
-                                            <p class="font-medium text-text-primary">Account Opening</p>
-                                            <p class="text-sm text-secondary-500">Waiting: 8:23</p>
-                                        </div>
+                                    <?php endforeach; ?>
+                                <?php else: ?>
+                                    <div class="text-center py-8 text-secondary-500">
+                                        <i class="fas fa-inbox text-4xl mb-4"></i>
+                                        <p>No tickets in queue</p>
                                     </div>
-                                    <div class="flex items-center space-x-3">
-                                        <div class="status-indicator bg-warning-100 text-warning-500">
-                                            <i class="fas fa-circle text-xs mr-1"></i>
-                                            Next
-                                        </div>
-                                        <div class="w-3 h-3 bg-warning rounded-full"></div>
-                                    </div>
-                                </div>
-
-                                <!-- Queue Item 2 -->
-                                <div class="flex items-center justify-between p-4 bg-secondary-50 rounded-lg">
-                                    <div class="flex items-center space-x-4">
-                                        <div class="w-12 h-12 bg-primary-100 rounded-lg flex items-center justify-center">
-                                            <span class="font-bold text-primary">B025</span>
-                                        </div>
-                                        <div>
-                                            <p class="font-medium text-text-primary">Account Opening</p>
-                                            <p class="text-sm text-secondary-500">Waiting: 5:12</p>
-                                        </div>
-                                    </div>
-                                    <div class="flex items-center space-x-3">
-                                        <span class="text-sm text-secondary-500">#2</span>
-                                        <div class="w-3 h-3 bg-secondary-300 rounded-full"></div>
-                                    </div>
-                                </div>
-
-                                <!-- Queue Item 3 -->
-                                <div class="flex items-center justify-between p-4 bg-secondary-50 rounded-lg">
-                                    <div class="flex items-center space-x-4">
-                                        <div class="w-12 h-12 bg-primary-100 rounded-lg flex items-center justify-center">
-                                            <span class="font-bold text-primary">B026</span>
-                                        </div>
-                                        <div>
-                                            <p class="font-medium text-text-primary">Account Opening</p>
-                                            <p class="text-sm text-secondary-500">Waiting: 2:45</p>
-                                        </div>
-                                    </div>
-                                    <div class="flex items-center space-x-3">
-                                        <span class="text-sm text-secondary-500">#3</span>
-                                        <div class="w-3 h-3 bg-secondary-300 rounded-full"></div>
-                                    </div>
-                                </div>
+                                <?php endif; ?>
                             </div>
 
                             <div class="mt-4 p-3 bg-primary-50 rounded-lg">
                                 <div class="flex items-center justify-between text-sm">
                                     <span class="text-secondary-600">Total in Queue:</span>
-                                    <span class="font-semibold text-text-primary">3 tickets</span>
+                                    <span class="font-semibold text-text-primary"><?php echo count($queue_tickets); ?> tickets</span>
                                 </div>
                                 <div class="flex items-center justify-between text-sm mt-1">
                                     <span class="text-secondary-600">Estimated Wait:</span>
-                                    <span class="font-semibold text-text-primary">~15 minutes</span>
+                                    <span class="font-semibold text-text-primary">~<?php echo count($queue_tickets) * 10; ?> minutes</span>
                                 </div>
                             </div>
                         </div>
@@ -296,7 +369,7 @@
                                         </div>
                                         <div>
                                             <p class="text-sm text-secondary-500">Tickets Served</p>
-                                            <p class="text-xl font-semibold text-text-primary">28</p>
+                                            <p class="text-xl font-semibold text-text-primary"><?php echo $today_served; ?></p>
                                         </div>
                                     </div>
                                     <div class="text-right">
@@ -314,7 +387,7 @@
                                         </div>
                                         <div>
                                             <p class="text-sm text-secondary-500">Avg. Service Time</p>
-                                            <p class="text-xl font-semibold text-text-primary">4.2 min</p>
+                                            <p class="text-xl font-semibold text-text-primary"><?php echo $avg_service_time; ?> min</p>
                                         </div>
                                     </div>
                                     <div class="text-right">
@@ -491,80 +564,75 @@
                 Calling Ticket...
             `;
 
-            // Simulate API call
-            setTimeout(() => {
-                // Update current ticket to next in queue
-                const currentTicket = document.getElementById('currentTicket');
-                currentTicket.innerHTML = `
-                    <div class="flex items-center justify-between mb-4">
-                        <div class="flex items-center space-x-4">
-                            <div class="w-16 h-16 bg-primary rounded-lg flex items-center justify-center">
-                                <span class="text-2xl font-bold text-white">B</span>
-                            </div>
-                            <div>
-                                <h4 class="text-3xl font-bold text-text-primary">B024</h4>
-                                <p class="text-secondary-600">Account Opening</p>
-                            </div>
-                        </div>
-                        <div class="text-right">
-                            <p class="text-sm text-secondary-500">Serving Time</p>
-                            <p class="text-2xl font-semibold text-text-primary" id="servingTime">00:00</p>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                        <div class="bg-surface rounded-lg p-4">
-                            <p class="text-sm text-secondary-500 mb-1">Customer Priority</p>
-                            <div class="flex items-center space-x-2">
-                                <div class="w-3 h-3 bg-warning rounded-full"></div>
-                                <span class="font-medium text-warning">Standard</span>
-                            </div>
-                        </div>
-                        <div class="bg-surface rounded-lg p-4">
-                            <p class="text-sm text-secondary-500 mb-1">Wait Time</p>
-                            <p class="font-semibold text-text-primary">8:23</p>
-                        </div>
-                    </div>
-
-                    <div class="flex flex-wrap gap-3">
-                        <button class="btn btn-primary flex-1 min-w-0" onclick="completeTicket()">
-                            <i class="fas fa-check mr-2"></i>
-                            Complete Service
-                        </button>
-                        <button class="btn btn-secondary" onclick="reassignTicket()">
-                            <i class="fas fa-exchange-alt mr-2"></i>
-                            Reassign
-                        </button>
-                        <button class="btn btn-secondary" onclick="recallTicket()">
-                            <i class="fas fa-undo mr-2"></i>
-                            Recall
-                        </button>
-                    </div>
-                `;
-
-                // Reset serving time
-                servingStartTime = new Date();
-
+            // Call API to get next ticket
+            fetch('../api/call_next_ticket.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    desk_id: 1 // You might want to get this dynamically
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.ticket) {
+                    showNotification(`Ticket ${data.ticket.ticket_number} has been called successfully!`, 'success');
+                    // Reload page to show updated data
+                    setTimeout(() => {
+                        location.reload();
+                    }, 1000);
+                } else {
+                    showNotification(data.message || 'No tickets in queue', 'info');
+                }
+                
                 // Reset button
                 callNextBtn.disabled = false;
                 callNextBtn.innerHTML = `
                     <i class="fas fa-phone mr-3 text-2xl"></i>
                     Call Next Ticket
                 `;
-
-                // Show success notification
-                showNotification('Ticket B024 has been called successfully!', 'success');
-            }, 2000);
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showNotification('Error calling next ticket', 'error');
+                
+                // Reset button
+                callNextBtn.disabled = false;
+                callNextBtn.innerHTML = `
+                    <i class="fas fa-phone mr-3 text-2xl"></i>
+                    Call Next Ticket
+                `;
+            });
         }
 
         // Complete Ticket
-        function completeTicket() {
+        function completeTicket(ticketId) {
             if (confirm('Are you sure you want to complete this ticket?')) {
-                showNotification('Ticket B024 completed successfully!', 'success');
-                // Simulate completing current ticket
-                setTimeout(() => {
-                    callNextTicket();
-                }, 1000);
+                fetch('../api/complete_ticket.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        ticket_id: ticketId
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showNotification('Ticket completed successfully!', 'success');
+                        setTimeout(() => {
+                            location.reload();
+                        }, 1000);
+                    } else {
+                        showNotification('Error completing ticket: ' + data.error, 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    showNotification('Error completing ticket', 'error');
+                });
             }
         }
 
@@ -643,13 +711,37 @@
 
         // Real-time updates simulation
         setInterval(() => {
-            // Simulate real-time queue updates
-            const timestamp = new Date().toLocaleTimeString();
-            console.log('Queue updated at:', timestamp);
+            // Fetch real-time queue status
+            fetch('../api/get_queue_status.php')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        console.log('Queue updated at:', new Date().toLocaleTimeString());
+                        // You can add specific updates here without full page reload
+                    }
+                })
+                .catch(error => console.error('Error fetching queue status:', error));
         }, 30000);
 
-        // Initialize
-        updateServingTime();
+        // Initialize serving time counter if there's a current ticket
+        <?php if ($current_ticket && $current_ticket['called_at']): ?>
+            let servingStartTime = new Date('<?php echo date('c', strtotime($current_ticket['called_at'])); ?>');
+            
+            function updateServingTime() {
+                const now = new Date();
+                const diff = Math.floor((now - servingStartTime) / 1000);
+                const minutes = Math.floor(diff / 60);
+                const seconds = diff % 60;
+                const servingTimeElement = document.getElementById('servingTime');
+                if (servingTimeElement) {
+                    servingTimeElement.textContent = 
+                        `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+                }
+            }
+            
+            setInterval(updateServingTime, 1000);
+            updateServingTime();
+        <?php endif; ?>
     </script>
 <script id="dhws-dataInjector" src="../public/dhws-data-injector.js"></script>
 </body>
